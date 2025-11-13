@@ -7,6 +7,8 @@ import utils
 import cv2
 import argparse
 import time
+from thop import profile, clever_format
+import time
 
 import numpy as np
 
@@ -120,12 +122,29 @@ def run(input_path, output_path, model_path, model_type="dpt_beit_large_512", op
     print("Initialize")
 
     # select device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    # elif torch.backends.mps.is_available():
+    #     device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+        
     print("Device: %s" % device)
 
     model, transform, net_w, net_h = load_model(device, model_path, model_type, optimize, height, square)
+    model = model.to(device)
 
-    # get input
+    print("\n-> Calculating Model MACs (THOP)... (Using clean re-loaded model)")
+    model_for_macs, _, _, _ = load_model(torch.device("cpu"), model_path, model_type, optimize, height, square)
+    dummy_input_macs = torch.randn(1, 3, net_h, net_w).cpu() 
+    total_macs, total_params = profile(model_for_macs, inputs=(dummy_input_macs,), verbose=False)
+    macs_f, params_f = clever_format([total_macs, total_params], "%.3f")
+
+    print(f"   Model Type: {model_type}")
+    print(f"   Input Size: ({net_h}x{net_w})")
+    print(f"   Total MACs: {macs_f}")
+    print(f"   Total Parameters: {params_f}\n")
+
     if input_path is not None:
         image_names = glob.glob(os.path.join(input_path, "*"))
         num_images = len(image_names)
@@ -150,9 +169,12 @@ def run(input_path, output_path, model_path, model_type="dpt_beit_large_512", op
             image = transform({"image": original_image_rgb})["image"]
 
             # compute
+            start_time_inference = time.time()
             with torch.no_grad():
                 prediction = process(device, model, model_type, image, (net_w, net_h), original_image_rgb.shape[1::-1],
                                      optimize, False)
+            elapsed_time_inference = time.time() - start_time_inference
+            print(f"    Inference Time: {elapsed_time_inference:.4f} seconds.")
 
             # output
             if output_path is not None:
@@ -178,10 +200,12 @@ def run(input_path, output_path, model_path, model_type="dpt_beit_large_512", op
                 if frame is not None:
                     original_image_rgb = np.flip(frame, 2)  # in [0, 255] (flip required to get RGB)
                     image = transform({"image": original_image_rgb/255})["image"]
-
+                    
+                    start_time_inference = time.time()
                     prediction = process(device, model, model_type, image, (net_w, net_h),
                                          original_image_rgb.shape[1::-1], optimize, True)
-
+                    elapsed_time_inference = time.time() - start_time_inference
+                    print(f" | Inference Time: {elapsed_time_inference:.4f} sec", end="")
                     original_image_bgr = np.flip(original_image_rgb, 2) if side else None
                     content = create_side_by_side(original_image_bgr, prediction, grayscale)
                     cv2.imshow('MiDaS Depth Estimation - Press Escape to close window ', content/255)
